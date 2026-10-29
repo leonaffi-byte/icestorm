@@ -918,7 +918,7 @@ class iceconfig:
             for entry in self.gbufin_db():
                 s1 = (entry[0], entry[1], "fabout")
                 s2 = (entry[0], entry[1], "glb_netwk_%d" % entry[2])
-                if s1 in seed_segments or (pio[0], pio[1]) in all_from_tiles:
+                if s1 in seed_segments or (entry[0], entry[1]) in all_from_tiles:
                     connected_segments.setdefault(s1, set()).add(s2)
                     connected_segments.setdefault(s2, set()).add(s1)
                     seed_segments.add(s1)
