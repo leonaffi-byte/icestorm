@@ -890,6 +890,10 @@ if do_collect:
         new_text_ports.add("%s [%d:%d] %s " % (direct, max_idx, min_idx, port))
     text_ports = list(new_text_ports)
 
+port_regs = set(p for p in port_wire_names if p in wire_to_reg)
+text_ports = ["%s reg %s = 0" % (t.split(" ", 1)[0], t.split(" ", 1)[1]) if t.split(" ", 1)[1] in port_regs else t
+              for t in text_ports]
+
 print("module %s (%s);\n" % (modname, ", ".join(text_ports)))
 
 new_text_wires = list()
@@ -898,6 +902,8 @@ new_text_raw = list()
 for line in text_wires:
     match = re_match_cached(r"wire ([^ ;]+)(.*)", line)
     if match:
+        if match.group(1) in port_wire_names:
+            continue
         if strip_comments:
             name = match.group(1)
             if name.startswith("\\"):
