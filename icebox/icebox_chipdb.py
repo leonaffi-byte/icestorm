@@ -23,6 +23,7 @@ mode_lm4k = False
 mode_5k = False
 mode_u4k = False
 mode_8k = False
+mode_ul1k = False
 
 def usage():
     print("""
@@ -42,11 +43,14 @@ Usage: %s [options] [bitmap.asc]
 
     -u
         create chipdb for u4k device
+
+    -U
+        create chipdb for ul1k device (iCE40 UltraLite)
 """ % os.path.basename(sys.argv[0]))
     sys.exit(0)
 
 try:
-    opts, args = getopt.getopt(sys.argv[1:], "3584u")
+    opts, args = getopt.getopt(sys.argv[1:], "3584uU")
 except:
     usage()
 
@@ -61,6 +65,8 @@ for o, a in opts:
         mode_lm4k = True
     elif o == "-u":
         mode_u4k = True
+    elif o == "-U":
+        mode_ul1k = True
     else:
         usage()
 
@@ -75,6 +81,8 @@ elif mode_lm4k:
     ic.setup_empty_lm4k()
 elif mode_u4k:
     ic.setup_empty_u4k()
+elif mode_ul1k:
+    ic.setup_empty_ul1k()
 else:
     ic.setup_empty_1k()
 
@@ -223,6 +231,8 @@ print()
 
 print(".gbufpin")
 for padin, pio in enumerate(ic.padin_pio_db()):
+    if pio is None:
+        continue
     entry = pio + (padin,)
     print(" ".join(["%d" % k for k in entry]))
 print()
@@ -298,15 +308,17 @@ if not mode_384:
 
 if ic.is_ultra():
     for dsp_idx in range(4):
-        print_tile_nonrouting_bits("dsp%d" % dsp_idx, list(ic.dsp_tiles[dsp_idx].keys())[0])
+        if ic.dsp_tiles[dsp_idx]:
+            print_tile_nonrouting_bits("dsp%d" % dsp_idx, list(ic.dsp_tiles[dsp_idx].keys())[0])
     print_tile_nonrouting_bits("ipcon", list(ic.ipcon_tiles.keys())[0])
-if ic.is_ultra():
-    print(".extra_cell %d 0 WARMBOOT" % ic.max_x)
-else:
-    print(".extra_cell 0 0 WARMBOOT")
-for key in sorted(icebox.warmbootinfo_db[ic.device]):
-    print("%s %s" % (key, " ".join([str(k) for k in icebox.warmbootinfo_db[ic.device][key]])))
-print()
+if ic.device in icebox.warmbootinfo_db:
+    if ic.is_ultra():
+        print(".extra_cell %d 0 WARMBOOT" % ic.max_x)
+    else:
+        print(".extra_cell 0 0 WARMBOOT")
+    for key in sorted(icebox.warmbootinfo_db[ic.device]):
+        print("%s %s" % (key, " ".join([str(k) for k in icebox.warmbootinfo_db[ic.device][key]])))
+    print()
 
 for pllid in ic.pll_list():
     pllinfo = icebox.pllinfo_db[pllid]

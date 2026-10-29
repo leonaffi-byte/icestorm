@@ -211,6 +211,9 @@ for bit in ic.extra_bits:
     if entry[0] == "padin_glb_netwk":
         glb = int(entry[1])
         pin_entry = ic.padin_pio_db()[glb]
+        if pin_entry is None:
+            # driven by a hard IP cell (e.g. an oscillator), see extra cells below
+            continue
         if pin_entry in iocells_pll:
             pll_gbuf[pin_entry] = (pin_entry[0], pin_entry[1], "padin_%d" % pin_entry[2])
             extra_segments.append(pll_gbuf[pin_entry])
@@ -263,8 +266,10 @@ for segs in sorted(ic.group_segments()):
                     iocells_out.add(cell)
                 extra_segments.append((seg[0], seg[1], "io_%d/PAD" % int(match.group(1))))
 
+open_drain = set(icebox.open_drain_db.get(ic.device, []))
+
 for cell in iocells:
-    if iocells_type[cell] == "100110" and not cell in iocells_special:
+    if iocells_type[cell] == "100110" and not cell in iocells_special and not cell in open_drain:
         s1 = (cell[0], cell[1], "io_%d/PAD" % cell[2])
         s2 = (cell[0], cell[1], "io_%d/D_OUT_0" % cell[2])
         extra_connections.append((s1, s2))
@@ -328,7 +333,7 @@ for segs in sorted(ic.group_segments(extra_connections=extra_connections, extra_
         match =  re_match_cached(r"lutff_(\d+)/", s[2])
         if match:
             #IpCon and DSP tiles look like logic tiles, but aren't.
-            if ic.device in ["5k", "u4k"] and (s[0] == 0 or s[0] == ic.max_x):
+            if ic.device in ["5k", "u4k", "ul1k"] and (s[0] == 0 or s[0] == ic.max_x) and (s[0], s[1]) not in ic.logic_tiles:
                 special_5k_queue.add((s[0], s[1]))
             else:
                 luts_queue.add((s[0], s[1], int(match.group(1))))
@@ -414,15 +419,139 @@ if lookup_symbols:
     text_func.append("")
 
 #print(nets)
-wb_boot = seg_to_net(icebox.warmbootinfo_db[ic.device]["BOOT"], "")
-wb_s0 = seg_to_net(icebox.warmbootinfo_db[ic.device]["S0"], "")
-wb_s1 = seg_to_net(icebox.warmbootinfo_db[ic.device]["S1"], "")
+if ic.device in icebox.warmbootinfo_db:
+    wb_boot = seg_to_net(icebox.warmbootinfo_db[ic.device]["BOOT"], "")
+    wb_s0 = seg_to_net(icebox.warmbootinfo_db[ic.device]["S0"], "")
+    wb_s1 = seg_to_net(icebox.warmbootinfo_db[ic.device]["S1"], "")
+else:
+    wb_boot = wb_s0 = wb_s1 = ""
 
 if wb_boot != "" or wb_s0 != "" or wb_s1 != "":
     text_func.append("SB_WARMBOOT warmboot (")
     text_func.append("  .BOOT(%s)," % wb_boot)
     text_func.append("  .S0(%s)," % wb_s0)
     text_func.append("  .S1(%s)" % wb_s1)
+    text_func.append(");")
+    text_func.append("")
+
+# Hard IP of the iCE40 Ultra devices (extra_cells_db): one instance for each
+# cell that has a configuration bit set, a used global network output (its
+# padin bit set) or a port on a net that leaves the IP's own tiles.
+def ec_config_bit(x, y, name):
+    tc = icebox.tileconfig(ic.tile(x, y))
+    for entry in ic.tile_db(x, y):
+        if entry[1] == "IpConfig" and entry[2] == name:
+            return tc.match(entry[0])
+    return None
+
+def ec_net_used(seg):
+    if seg not in seg2net:
+        return False
+    return any(s[:2] != seg[:2] and not s[2].startswith("glb_netwk_") for s in nets[seg2net[seg]])
+
+def ec_pad_port(site):
+    p = "io_%d_%d_%d" % site
+    if lookup_pins or pcf_data:
+        for entry in ic.pinloc_db(package):
+            if site == (entry[1], entry[2], entry[3]):
+                if (entry[0],) in pcf_data:
+                    p = pcf_data[(entry[0],)]
+                elif site in pcf_data:
+                    p = pcf_data[site]
+                elif lookup_pins:
+                    p = "pin_%s" % entry[0]
+    unmatched_ports.discard(p)
+    text_ports.append("output %s" % p)
+    return p
+
+def ec_params(name, bits):
+    def code(prefix, n):
+        if "%s_0" % prefix not in bits:
+            return None
+        return "\"0b%s\"" % "".join("1" if bits.get("%s_%d" % (prefix, i)) else "0" for i in range(n - 1, -1, -1))
+    params = []
+    if name == "HFOSC" and "CLKHF_DIV_0" in bits:
+        params.append(("CLKHF_DIV", code("CLKHF_DIV", 2)))
+    if name in ("RGBA_DRV", "RGB_DRV", "IR400_DRV", "IR500_DRV", "BARCODE_DRV") and "CURRENT_MODE" in bits:
+        params.append(("CURRENT_MODE", "\"0b%d\"" % bits["CURRENT_MODE"]))
+    if name in ("RGBA_DRV", "RGB_DRV"):
+        for i in range(3):
+            params.append(("RGB%d_CURRENT" % i, code("RGB%d_CURRENT" % i, 6)))
+    for prefix, n in (("IR400_CURRENT", 8), ("IR500_CURRENT", 12), ("BARCODE_CURRENT", 4)):
+        if name == prefix.split("_")[0] + "_DRV":
+            params.append((prefix, code(prefix, n)))
+    return [p for p in params if p[1] is not None]
+
+# inputs and configuration bits that several cells share (e.g. CURREN of the
+# UltraLite LED drivers) connect each cell but do not make it used. SB_IR500_DRV
+# is the IR and barcode drivers together: these are alternatives, not sharers.
+ec_alternatives = {"IR500_DRV": {"IR400_DRV", "BARCODE_DRV"}, "IR400_DRV": {"IR500_DRV"}, "BARCODE_DRV": {"IR500_DRV"}}
+ec_owners = dict()
+for (name, loc), info in icebox.extra_cells_db.get(ic.device, {}).items():
+    for v in info.values():
+        if not isinstance(v[2], int):
+            ec_owners.setdefault(v, set()).add(name)
+def ec_shared(name, val):
+    return bool(ec_owners[val] - ec_alternatives.get(name, set()) - {name})
+ec_used = set()
+vpp_1p8v = False
+for (ec_name, ec_loc), ec_info in sorted(icebox.extra_cells_db.get(ic.device, {}).items(),
+                                         key=lambda e: (e[0][0] != "IR500_DRV", e[0])):
+    # SB_IR500_DRV is the IR and barcode drivers together
+    if ec_name in ("IR400_DRV", "BARCODE_DRV") and "IR500_DRV" in ec_used:
+        continue
+    bits, ports, pads = dict(), dict(), dict()
+    used = False
+    for key, val in sorted(ec_info.items()):
+        if isinstance(val[2], int):
+            pads[key] = val
+            continue
+        b = ec_config_bit(*val)
+        if b is not None:
+            bits[key] = b
+            used |= b and not ec_shared(ec_name, val)
+            continue
+        m = re_match_cached(r"glb_netwk_(\d)$", val[2])
+        if m:
+            if ("padin_glb_netwk", m.group(1)) in [ic.lookup_extra_bit(eb) for eb in ic.extra_bits]:
+                ports[key] = seg_to_net(val)
+                used = True
+            continue
+        if ec_net_used(val):
+            ports[key] = seg_to_net(val)
+            used |= not ec_shared(ec_name, val)
+    if not used or (ec_name == "IR500_DRV" and not bits.get("IR500_DRV_EN")):
+        continue
+    ec_used.add(ec_name)
+    params = ec_params(ec_name, bits)
+    # oscillator clock into the fabric: the primitive port is CLKHF/CLKLF, with
+    # the ROUTE_THROUGH_FABRIC attribute
+    fabric = [k for k in ports if k.endswith("_FABRIC")]
+    for k in fabric:
+        ports[k[:-len("_FABRIC")]] = ports.pop(k)
+    if fabric:
+        text_func.append("(* ROUTE_THROUGH_FABRIC=1 *)")
+    # UltraLite: VPP_2V5 at 1.8 V, an attribute of the top-level module (iCEcube2)
+    if bits.get("VPP_2V5_TO_1P8V"):
+        vpp_1p8v = True
+    # UltraLite SB_IR500_DRV: iCEcube2's cell has one enable and one PWM input for both drivers
+    if ec_name == "IR500_DRV":
+        for p1, p2 in (("IRLEDEN", "IRLEDEN2"), ("IRPWM", "IRPWM2")):
+            if p2 in ports and ports.get(p1) == ports[p2]:
+                del ports[p2]
+    if not strip_comments:
+        text_func.append("// %s at %d %d %d, config bits set: %s" % ((ec_name,) + ec_loc +
+                         (" ".join(k for k in sorted(bits) if bits[k]) or "none",)))
+    text_func.append("SB_%s %s%s_%d_%d_%d (" % (ec_name, "#(\n" + ",\n".join("  .%s(%s)" % p for p in params) + "\n) " if params else "",
+                     ec_name, ec_loc[0], ec_loc[1], ec_loc[2]))
+    conns = ["  .%s(%s)" % (k, v) for k, v in sorted(ports.items())]
+    # pads of the cell (RGB/IR drivers): only the channels with a current set,
+    # and only if not also used as a normal IO
+    for k, v in sorted(pads.items()):
+        current = [bits[b] for b in bits if b.startswith(k + "_CURRENT_")]
+        if v not in iocells and (not current or any(current)):
+            conns.append("  .%s(%s)" % (k, ec_pad_port(v)))
+    text_func.append(",\n".join(conns))
     text_func.append(");")
     text_func.append("")
 
@@ -439,6 +568,12 @@ def get_pll_adjmode(pllinfo, name):
     if v == "0": return "FIXED"
     if v == "1": return "DYNAMIC"
     assert False
+
+# Ports missing in pllinfo_db (not known for the device) are left open.
+def pll_port(pllinfo, name, default=None):
+    if name not in pllinfo:
+        return "" if default is None else default
+    return seg_to_net(pllinfo[name], default)
 
 def get_pll_outsel(pllinfo, name):
     v = get_pll_bits(pllinfo, name, 2)
@@ -514,15 +649,15 @@ for pllid in ic.pll_list():
             text_func.append("  .PLLOUTCOREB(%s)," % seg_to_net(pad_segment))
             if pllinfo["PLLOUT_B"] in pll_gbuf:
                 text_func.append("  .PLLOUTGLOBALB(%s)," % seg_to_net(pll_gbuf[pllinfo["PLLOUT_B"]]))
-        text_func.append("  .EXTFEEDBACK(%s)," % seg_to_net(pllinfo["EXTFEEDBACK"], "1'b0"))
-        text_func.append("  .DYNAMICDELAY({%s})," % ", ".join([seg_to_net(pllinfo["DYNAMICDELAY_%d" % i], "1'b0") for i in range(7, -1, -1)]))
-        text_func.append("  .LOCK(%s)," % seg_to_net(pllinfo["LOCK"]))
-        text_func.append("  .BYPASS(%s)," % seg_to_net(pllinfo["BYPASS"], "1'b0"))
-        text_func.append("  .RESETB(%s)," % seg_to_net(pllinfo["RESETB"], "1'b0"))
-        text_func.append("  .LATCHINPUTVALUE(%s)," % seg_to_net(pllinfo["LATCHINPUTVALUE"], "1'b0"))
-        text_func.append("  .SDO(%s)," % seg_to_net(pllinfo["SDO"]))
-        text_func.append("  .SDI(%s)," % seg_to_net(pllinfo["SDI"], "1'b0"))
-        text_func.append("  .SCLK(%s)" % seg_to_net(pllinfo["SCLK"], "1'b0"))
+        text_func.append("  .EXTFEEDBACK(%s)," % pll_port(pllinfo, "EXTFEEDBACK", "1'b0"))
+        text_func.append("  .DYNAMICDELAY({%s})," % ", ".join([pll_port(pllinfo, "DYNAMICDELAY_%d" % i, "1'b0") for i in range(7, -1, -1)]))
+        text_func.append("  .LOCK(%s)," % pll_port(pllinfo, "LOCK"))
+        text_func.append("  .BYPASS(%s)," % pll_port(pllinfo, "BYPASS", "1'b0"))
+        text_func.append("  .RESETB(%s)," % pll_port(pllinfo, "RESETB", "1'b0"))
+        text_func.append("  .LATCHINPUTVALUE(%s)," % pll_port(pllinfo, "LATCHINPUTVALUE", "1'b0"))
+        text_func.append("  .SDO(%s)," % pll_port(pllinfo, "SDO"))
+        text_func.append("  .SDI(%s)," % pll_port(pllinfo, "SDI", "1'b0"))
+        text_func.append("  .SCLK(%s)" % pll_port(pllinfo, "SCLK", "1'b0"))
         text_func.append(");")
 
     if plltype in ["011", "111"]:
@@ -550,7 +685,7 @@ for pllid in ic.pll_list():
             text_func.append("  .ENABLE_ICEGATE_PORTB(1'b0),")
         text_func.append("  .TEST_MODE(1'b%s)" % get_pll_bit(pllinfo, "TEST_MODE"))
         text_func.append(") PLL_%d_%d (" % pllinfo["LOC"])
-        text_func.append("  .REFERENCECLK(%s)," % seg_to_net(pllinfo["REFERENCECLK"], "1'b0"))
+        text_func.append("  .REFERENCECLK(%s)," % pll_port(pllinfo, "REFERENCECLK", "1'b0"))
         if plltype == "011":
             pad_segment = (pllinfo["PLLOUT_A"][0], pllinfo["PLLOUT_A"][1], "io_%d/D_IN_0" % pllinfo["PLLOUT_A"][2])
             text_func.append("  .PLLOUTCORE(%s)," % seg_to_net(pad_segment))
@@ -565,15 +700,15 @@ for pllid in ic.pll_list():
             text_func.append("  .PLLOUTCOREB(%s)," % seg_to_net(pad_segment))
             if pllinfo["PLLOUT_B"] in pll_gbuf:
                 text_func.append("  .PLLOUTGLOBALB(%s)," % seg_to_net(pll_gbuf[pllinfo["PLLOUT_B"]]))
-        text_func.append("  .EXTFEEDBACK(%s)," % seg_to_net(pllinfo["EXTFEEDBACK"], "1'b0"))
-        text_func.append("  .DYNAMICDELAY({%s})," % ", ".join([seg_to_net(pllinfo["DYNAMICDELAY_%d" % i], "1'b0") for i in range(7, -1, -1)]))
-        text_func.append("  .LOCK(%s)," % seg_to_net(pllinfo["LOCK"]))
-        text_func.append("  .BYPASS(%s)," % seg_to_net(pllinfo["BYPASS"], "1'b0"))
-        text_func.append("  .RESETB(%s)," % seg_to_net(pllinfo["RESETB"], "1'b0"))
-        text_func.append("  .LATCHINPUTVALUE(%s)," % seg_to_net(pllinfo["LATCHINPUTVALUE"], "1'b0"))
-        text_func.append("  .SDO(%s)," % seg_to_net(pllinfo["SDO"]))
-        text_func.append("  .SDI(%s)," % seg_to_net(pllinfo["SDI"], "1'b0"))
-        text_func.append("  .SCLK(%s)" % seg_to_net(pllinfo["SCLK"], "1'b0"))
+        text_func.append("  .EXTFEEDBACK(%s)," % pll_port(pllinfo, "EXTFEEDBACK", "1'b0"))
+        text_func.append("  .DYNAMICDELAY({%s})," % ", ".join([pll_port(pllinfo, "DYNAMICDELAY_%d" % i, "1'b0") for i in range(7, -1, -1)]))
+        text_func.append("  .LOCK(%s)," % pll_port(pllinfo, "LOCK"))
+        text_func.append("  .BYPASS(%s)," % pll_port(pllinfo, "BYPASS", "1'b0"))
+        text_func.append("  .RESETB(%s)," % pll_port(pllinfo, "RESETB", "1'b0"))
+        text_func.append("  .LATCHINPUTVALUE(%s)," % pll_port(pllinfo, "LATCHINPUTVALUE", "1'b0"))
+        text_func.append("  .SDO(%s)," % pll_port(pllinfo, "SDO"))
+        text_func.append("  .SDI(%s)," % pll_port(pllinfo, "SDI", "1'b0"))
+        text_func.append("  .SCLK(%s)" % pll_port(pllinfo, "SCLK", "1'b0"))
         text_func.append(");")
 
     text_func.append("")
@@ -696,7 +831,13 @@ for cell in iocells:
                 text_func.append("reg %s;" % eff_dout)
                 text_func.append("always @(%s %s) %s%s <= !%s;" % (posedge, net_oclk, ocen_cond, eff_dout, net_dout0))
 
-            if eff_oen == "1":
+            if cell in open_drain:
+                # the pad only pulls low
+                if eff_oen == "1":
+                    text_func.append("assign %s = %s ? 1'bz : 1'b0;" % (net_pad, eff_dout))
+                else:
+                    text_func.append("assign %s = (%s && !%s) ? 1'b0 : 1'bz;" % (net_pad, eff_oen, eff_dout))
+            elif eff_oen == "1":
                 text_func.append("assign %s = %s;" % (net_pad, eff_dout))
             else:
                 text_func.append("assign %s = %s ? %s : 1'bz;" % (net_pad, eff_oen, eff_dout))
@@ -714,15 +855,31 @@ for tile in ic.ramb_tiles:
             assert entry[2] not in ram_config_bitidx
             ram_config_bitidx[entry[2]] = ('B', entry[0])
     for entry in ic.tile_db(tile[0], tile[1]+1):
-        if entry[1] == "RamConfig":
+        if entry[1] == "RamConfig" or (ic.device == "ul1k" and entry[1] == "RamCascade"):
             assert entry[2] not in ram_config_bitidx
             ram_config_bitidx[entry[2]] = ('T', entry[0])
     break
 
+# ul1k: iCEcube2 feeds equal addresses to the RAM at the top of a column and
+# passes them down: RamCascade CBIT_5/CBIT_7 (in the RAMT tile) drive the address
+# buses to the RAM below, CBIT_4/CBIT_6 take them from the RAM above. The two
+# bits of each pair are always set together in the known bitstreams, so which
+# pair is WADDR and which RADDR is not known; CBIT_4 is taken as WADDR.
+ram_cascade_in = {"WADDR": "CBIT_4", "RADDR": "CBIT_6"} if ic.device == "ul1k" else {}
+
+def ram_address_tile(tile, bus):
+    while bus in ram_cascade_in:
+        ramt = icebox.tileconfig(ic.tile(tile[0], tile[1]+1))
+        if not ramt.match(ram_config_bitidx[ram_cascade_in[bus]][1]):
+            break
+        tile = (tile[0], tile[1]+2)
+    return tile
+
 for tile in ic.ramb_tiles:
     ramb_config = icebox.tileconfig(ic.tile(tile[0], tile[1]))
     ramt_config = icebox.tileconfig(ic.tile(tile[0], tile[1]+1))
-    if ic.device == "8k":
+    # ul1k: RCLK polarity in the RAMB tile, as iCEcube2 netlists show
+    if ic.device in ("8k", "ul1k"):
         negclk_rd = icebox.get_negclk_bit(ic.tile(tile[0], tile[1])) == "1"
         negclk_wr = icebox.get_negclk_bit(ic.tile(tile[0], tile[1]+1)) == "1"
     else:
@@ -738,18 +895,19 @@ for tile in ic.ramb_tiles:
             assert False
     def get_ram_wire(name, msb, lsb, default="1'b0"):
         wire_bits = []
+        src = ram_address_tile(tile, name)
         for i in range(msb, lsb-1, -1):
             if msb != lsb:
                 n = "ram/%s_%d" % (name, i)
             else:
                 n = "ram/" + name
-            b = seg_to_net((tile[0], tile[1], n), default)
-            b = seg_to_net((tile[0], tile[1]+1, n), b)
+            b = seg_to_net((src[0], src[1], n), default)
+            b = seg_to_net((src[0], src[1]+1, n), b)
             wire_bits.append(b)
         if len(wire_bits) > 1:
             return "{%s}" % ", ".join(wire_bits)
         return wire_bits[0]
-    if get_ram_config('PowerUp') == (ic.device in ("8k", "5k", "u4k")):
+    if get_ram_config('PowerUp') == (ic.device in ("8k", "5k", "u4k", "ul1k")):
         if not strip_comments:
             text_func.append("// RAM TILE %d %d" % tile)
         text_func.append("SB_RAM40_4K%s%s #(" % ("NR" if negclk_rd else "", "NW" if negclk_wr else ""));
@@ -894,6 +1052,8 @@ port_regs = set(p for p in port_wire_names if p in wire_to_reg)
 text_ports = ["%s reg %s = 0" % (t.split(" ", 1)[0], t.split(" ", 1)[1]) if t.split(" ", 1)[1] in port_regs else t
               for t in text_ports]
 
+if vpp_1p8v:
+    print("(* VPP_2V5_TO_1P8V = 1 *)")
 print("module %s (%s);\n" % (modname, ", ".join(text_ports)))
 
 new_text_wires = list()

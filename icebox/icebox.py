@@ -163,6 +163,32 @@ class iceconfig:
                 else:
                     self.ipcon_tiles[(x, y)] = ["0" * 54 for i in range(16)]
 
+    # iCE40 UltraLite (iCE40UL1K/UL640, die T01): 14 x 16 tiles, no left/right
+    # IO, RAM columns 3 and 10, IPConnect tiles in the side columns at rows
+    # 1-3 and 12-14 and logic tiles in between (from the iCEcube2 glb
+    # bitmap listing of a UL1K design).
+    def setup_empty_ul1k(self):
+        self.clear()
+        self.device = "ul1k"
+        self.max_x = 13
+        self.max_y = 15
+
+        for x in range(0, self.max_x+1):
+            for y in range(1, self.max_y):
+                if x in (0, self.max_x) and (1 <= y <= 3 or 12 <= y <= 14):
+                    self.ipcon_tiles[(x, y)] = ["0" * 54 for i in range(16)]
+                elif x in (3, 10):
+                    if y % 2 == 1:
+                        self.ramb_tiles[(x, y)] = ["0" * 42 for i in range(16)]
+                    else:
+                        self.ramt_tiles[(x, y)] = ["0" * 42 for i in range(16)]
+                else:
+                    self.logic_tiles[(x, y)] = ["0" * 54 for i in range(16)]
+
+        for x in range(1, self.max_x):
+            self.io_tiles[(x, 0)] = ["0" * 18 for i in range(16)]
+            self.io_tiles[(x, self.max_y)] = ["0" * 18 for i in range(16)]
+
     def setup_empty_5k(self):
         self.clear()
         self.device = "5k"
@@ -241,6 +267,7 @@ class iceconfig:
             if self.device == "lm4k": return pinloc_db["lm4k-cm49"]
             if self.device == "u4k": return pinloc_db["u4k-sg48"]
             if self.device == "5k": return pinloc_db["5k-sg48"]
+            if self.device == "ul1k": return pinloc_db["ul1k-cm36a"]
             if self.device == "8k": return pinloc_db["8k-ct256"]
         else:
             return pinloc_db[self.device + "-" + package]
@@ -272,6 +299,8 @@ class iceconfig:
             return ["5k"]
         if self.device == "8k":
             return ["8k_0", "8k_1"]
+        if self.device == "ul1k":
+            return ["ul1k"]
         if self.device == "384":
             return [ ]
         assert False
@@ -279,7 +308,7 @@ class iceconfig:
     # Return true if device is Ultra/UltraPlus series, i.e. has
     # IpConnect/DSP at the sides instead of IO
     def is_ultra(self):
-        return self.device in ["5k", "u4k"]
+        return self.device in ["5k", "u4k", "ul1k"]
 
     def colbuf_db(self):
         if self.device == "1k":
@@ -330,6 +359,18 @@ class iceconfig:
                     if  9 <= y <= 16: src_y =  9
                     if 17 <= y <= 24: src_y = 24
                     if 25 <= y <= 33: src_y = 25
+                    entries.append((x, src_y, x, y))
+            return entries
+
+        if self.device == "ul1k":
+            entries = list()
+            for x in range(self.max_x+1):
+                for y in range(self.max_y+1):
+                    src_y = None
+                    if  0 <= y <=  2: src_y =  2
+                    if  3 <= y <=  6: src_y =  3
+                    if  7 <= y <= 10: src_y = 10
+                    if 11 <= y <= 15: src_y = 11
                     entries.append((x, src_y, x, y))
             return entries
 
@@ -424,7 +465,7 @@ class iceconfig:
           if x == 0: return iotile_l_db
           if x == self.max_x: return iotile_r_db
         # The 5k needs an IO db including the extra bits
-        if self.device == "5k" or self.device == "u4k":
+        if self.device in ("5k", "u4k", "ul1k"):
             if y == 0: return iotile_b_5k_db
             if y == self.max_y: return iotile_t_5k_db
         else:
@@ -434,11 +475,11 @@ class iceconfig:
             if (x, y) in self.logic_tiles: return logictile_db
             if (x, y) in self.ramb_tiles: return rambtile_db
             if (x, y) in self.ramt_tiles: return ramttile_db
-        elif self.device == "5k" or self.device == "u4k":
+        elif self.device in ("5k", "u4k", "ul1k"):
             if (x, y) in self.logic_tiles: return logictile_5k_db
             if (x, y) in self.ramb_tiles: return rambtile_8k_db
             if (x, y) in self.ramt_tiles: return ramttile_8k_db
-            if (x, y) in self.ipcon_tiles: return ipcon_5k_db
+            if (x, y) in self.ipcon_tiles: return ipcon_ul1k_db if self.device == "ul1k" else ipcon_5k_db
             if (x, y) in self.dsp_tiles[0]: return dsp0_5k_db
             if (x, y) in self.dsp_tiles[1]: return dsp1_5k_db
             if (x, y) in self.dsp_tiles[2]: return dsp2_5k_db
@@ -486,23 +527,26 @@ class iceconfig:
     @functools.lru_cache(maxsize=2**16)
     def tile_has_net(self, x, y, netname):
         if netname.startswith("logic_op_"):
+            # ul1k: the corner IO tiles also see the outputs (slf_op) of the
+            # IPConnect tiles in the side columns
+            side = self.device == "ul1k"
             if netname.startswith("logic_op_bot_"):
                 if y == self.max_y and 0 < x < self.max_x: return True
             if netname.startswith("logic_op_bnl_"):
                 if x == self.max_x and 1 < y < self.max_y and (not self.is_ultra()): return True
-                if y == self.max_y and 1 < x < self.max_x: return True
+                if y == self.max_y and 1 - side < x < self.max_x: return True
             if netname.startswith("logic_op_bnr_"):
                 if x == 0 and 1 < y < self.max_y and (not self.is_ultra()): return True
-                if y == self.max_y and 0 < x < self.max_x-1: return True
+                if y == self.max_y and 0 < x < self.max_x-1 + side: return True
 
             if netname.startswith("logic_op_top_"):
                 if y == 0 and 0 < x < self.max_x: return True
             if netname.startswith("logic_op_tnl_"):
                 if x == self.max_x and 0 < y < self.max_y-1 and (not self.is_ultra()): return True
-                if y == 0 and 1 < x < self.max_x: return True
+                if y == 0 and 1 - side < x < self.max_x: return True
             if netname.startswith("logic_op_tnr_"):
                 if x == 0 and 0 < y < self.max_y-1 and (not self.is_ultra()): return True
-                if y == 0 and 0 < x < self.max_x-1: return True
+                if y == 0 and 0 < x < self.max_x-1 + side: return True
 
             if netname.startswith("logic_op_lft_"):
                 if x == self.max_x and (not self.is_ultra()): return True
@@ -531,7 +575,7 @@ class iceconfig:
     def follow_funcnet(self, x, y, func):
         neighbours = set()
         def do_direction(name, nx, ny):
-            if (0 < nx < self.max_x or self.is_ultra()) and 0 < ny < self.max_y:
+            if (0 < nx < self.max_x or (self.is_ultra() and 0 <= nx <= self.max_x)) and 0 < ny < self.max_y:
                 neighbours.add((nx, ny, "neigh_op_%s_%d" % (name, func)))
             if nx in (0, self.max_x) and 0 < ny < self.max_y and nx != x and (not self.is_ultra()):
                 neighbours.add((nx, ny, "logic_op_%s_%d" % (name, func)))
@@ -552,16 +596,22 @@ class iceconfig:
         pos = self.tile_pos(x, y)
 
         if npos is not None and pos is not None:
-            if npos == "x":
+            # ul1k: the side columns also hold logic tiles, and the outputs of the
+            # IPConnect tiles (slf_op) reach the neighbours' neigh_op wires (seen
+            # in iCEcube2 routes of hard IP outputs)
+            if npos == "x" or (npos in ("l", "r") and (nx, ny) in self.logic_tiles) or \
+                    (self.device == "ul1k" and (nx, ny) in self.ipcon_tiles):
                 if (nx, ny) in self.logic_tiles:
                     return (nx, ny, "lutff_%d/out" % func)
+                if (nx, ny) in self.ipcon_tiles:
+                    return (nx, ny, "slf_op_%d" % func)
                 for i in range(4):
                     if (nx, ny) in self.dsp_tiles[i]: #TODO: check this
                         return (nx, ny, "mult/O_%d" % (i * 8 + func))
                 if (nx, ny) in self.ramb_tiles:
                     if self.device == "1k":
                         return (nx, ny, "ram/RDATA_%d" % func)
-                    elif self.device == "5k" or self.device == "u4k":
+                    elif self.device in ("5k", "u4k", "ul1k"):
                         return (nx, ny, "ram/RDATA_%d" % (15-func))
                     elif self.device == "8k" or self.device == "lm4k":
                         return (nx, ny, "ram/RDATA_%d" % (15-func))
@@ -570,7 +620,7 @@ class iceconfig:
                 if (nx, ny) in self.ramt_tiles:
                     if self.device == "1k":
                         return (nx, ny, "ram/RDATA_%d" % (8+func))
-                    elif self.device == "5k" or self.device == "u4k":
+                    elif self.device in ("5k", "u4k", "ul1k"):
                         return (nx, ny, "ram/RDATA_%d" % (7-func))
                     elif self.device == "8k" or self.device == "lm4k":
                         return (nx, ny, "ram/RDATA_%d" % (7-func))
@@ -608,11 +658,15 @@ class iceconfig:
         if match:
             funcnets |= self.follow_funcnet(x, y, int(match.group(1)))
 
+        match = re_match_cached(r"slf_op_(\d+)$", netname)
+        if match and self.device == "ul1k" and (x, y) in self.ipcon_tiles:
+            funcnets |= self.follow_funcnet(x, y, int(match.group(1)))
+
         match = re_match_cached(r"ram/RDATA_(\d+)", netname)
         if match:
             if self.device == "1k":
                 funcnets |= self.follow_funcnet(x, y, int(match.group(1)) % 8)
-            elif self.device == "5k" or self.device == "u4k":
+            elif self.device in ("5k", "u4k", "ul1k"):
                 funcnets |= self.follow_funcnet(x, y, 7 - int(match.group(1)) % 8)
             elif self.device == "8k" or self.device == "lm4k":
                 funcnets |= self.follow_funcnet(x, y, 7 - int(match.group(1)) % 8)
@@ -846,7 +900,7 @@ class iceconfig:
                 seed_segments.add((idx[0], idx[1], "lutff_7/cout"))
             if self.device == "1k":
                 add_seed_segments(idx, tile, logictile_db)
-            elif self.device == "5k" or self.device == "u4k":
+            elif self.device in ("5k", "u4k", "ul1k"):
                 add_seed_segments(idx, tile, logictile_5k_db)
             elif self.device == "8k" or self.device == "lm4k":
                 add_seed_segments(idx, tile, logictile_8k_db)
@@ -858,7 +912,7 @@ class iceconfig:
         for idx, tile in self.ramb_tiles.items():
             if self.device == "1k":
                 add_seed_segments(idx, tile, rambtile_db)
-            elif self.device == "5k" or self.device == "u4k":
+            elif self.device in ("5k", "u4k", "ul1k"):
                 add_seed_segments(idx, tile, rambtile_8k_db)
             elif self.device == "8k" or self.device == "lm4k":
                 add_seed_segments(idx, tile, rambtile_8k_db)
@@ -868,7 +922,7 @@ class iceconfig:
         for idx, tile in self.ramt_tiles.items():
             if self.device == "1k":
                 add_seed_segments(idx, tile, ramttile_db)
-            elif self.device == "5k" or self.device == "u4k":
+            elif self.device in ("5k", "u4k", "ul1k"):
                 add_seed_segments(idx, tile, ramttile_8k_db)
             elif self.device == "8k" or self.device == "lm4k":
                 add_seed_segments(idx, tile, ramttile_8k_db)
@@ -876,21 +930,23 @@ class iceconfig:
                 assert False
 
         for idx, tile in self.dsp_tiles[0].items():
-            if self.device == "5k" or self.device == "u4k":
+            if self.device in ("5k", "u4k", "ul1k"):
                 add_seed_segments(idx, tile, dsp0_5k_db)
         for idx, tile in self.dsp_tiles[1].items():
-            if self.device == "5k" or self.device == "u4k":
+            if self.device in ("5k", "u4k", "ul1k"):
                 add_seed_segments(idx, tile, dsp1_5k_db)
         for idx, tile in self.dsp_tiles[2].items():
-            if self.device == "5k" or self.device == "u4k":
+            if self.device in ("5k", "u4k", "ul1k"):
                 add_seed_segments(idx, tile, dsp2_5k_db)
         for idx, tile in self.dsp_tiles[3].items():
-            if self.device == "5k" or self.device == "u4k":
+            if self.device in ("5k", "u4k", "ul1k"):
                 add_seed_segments(idx, tile, dsp3_5k_db)
         for idx, tile in self.ipcon_tiles.items():
-            if self.device == "5k" or self.device == "u4k":
-                add_seed_segments(idx, tile, ipcon_5k_db)
+            if self.device in ("5k", "u4k", "ul1k"):
+                add_seed_segments(idx, tile, self.tile_db(idx[0], idx[1]))
         for padin, pio in enumerate(self.padin_pio_db()):
+            if pio is None:
+                continue
             s1 = (pio[0], pio[1], "padin_%d" % pio[2])
             s2 = (pio[0], pio[1], "glb_netwk_%d" % padin)
             if s1 in seed_segments or (pio[0], pio[1]) in all_from_tiles:
@@ -1015,7 +1071,7 @@ class iceconfig:
                     self.extra_bits.add((int(line[1]), int(line[2]), int(line[3])))
                     continue
                 if line[0] == ".device":
-                    assert line[1] in ["1k", "lm4k", "u4k", "5k", "8k", "384"]
+                    assert line[1] in ["1k", "lm4k", "u4k", "5k", "8k", "384", "ul1k"]
                     self.device = line[1]
                     continue
                 if line[0] == ".warmboot":
@@ -1492,7 +1548,7 @@ def parse_db(text, device="1k"):
             line = line_1k
         elif line_8k != line:
             # global network is the same for 8k, 5k, lm4k, and u4k
-            if device != "8k" and device != "5k" and device != "lm4k" and device != "u4k":
+            if device != "8k" and device != "5k" and device != "lm4k" and device != "u4k" and device != "ul1k":
                 continue
             line = line_8k
         elif line_384 != line:
@@ -1507,6 +1563,20 @@ def parse_db(text, device="1k"):
     return db
 
 extra_bits_db = {
+    # ul1k: bit 0 of each global network's clock tree mux (select 1 = padin,
+    # 0 = fabout). 4 and 5 are the HFOSC and LFOSC outputs (see
+    # extra_cells_db), the pads are in padin_pio_db. Each bit is set in
+    # iCEcube2 builds that use the pad or oscillator. Network 0 has no pad in
+    # CM36A and SWG16, so it has no padin bit here.
+    "ul1k": {
+        (0, 367, 110): ("padin_glb_netwk", "1"),
+        (1, 366, 143): ("padin_glb_netwk", "2"),
+        (1, 367, 143): ("padin_glb_netwk", "3"),
+        (1, 366, 142): ("padin_glb_netwk", "4"),
+        (1, 367, 142): ("padin_glb_netwk", "5"),
+        (0, 366, 111): ("padin_glb_netwk", "6"),
+        (0, 367, 111): ("padin_glb_netwk", "7"),
+    },
     "1k": {
         (0, 330, 142): ("padin_glb_netwk", "0"),
         (0, 331, 142): ("padin_glb_netwk", "1"),
@@ -1570,6 +1640,19 @@ extra_bits_db = {
 }
 
 gbufin_db = {
+    # ul1k: the 8 "GIO" IO tiles. All but (7,0) and (10,15) are named in
+    # iCEcube2 routes (gbuf/out -> fabout_N -> glb_netwk_N); those two are the
+    # remaining pair, in the order of the corresponding u4k tiles.
+    "ul1k": [
+        ( 7,  0,  0),
+        ( 7, 15,  1),
+        (10, 15,  2),
+        ( 3, 15,  3),
+        ( 6, 15,  4),
+        ( 6,  0,  5),
+        ( 3,  0,  6),
+        (10,  0,  7),
+    ],
     "1k": [
         (13,  8,  7),
         ( 0,  8,  6),
@@ -1641,6 +1724,10 @@ gbufin_db = {
 # Note: This may not work if your icepack configuration of cell sizes is incorrect because
 # icebox_vlog.py won't correctly interpret the meaning of particular bits.
 iolatch_db = {
+    "ul1k": [
+        ( 5,  0),
+        ( 5, 15),
+    ],
     "1k": [
         ( 0,  7),
         (13, 10),
@@ -1676,6 +1763,11 @@ iolatch_db = {
 # The x, y cell locations of the WARMBOOT controls. Run tests/sb_warmboot.v
 # through icecube.sh to determine these values.
 warmbootinfo_db = {
+    "ul1k": {
+        "BOOT": ( 13, 12, "lutff_3/in_1" ),
+        "S0":   ( 13, 12, "lutff_4/in_1" ),
+        "S1":   ( 13, 12, "lutff_5/in_1" ),
+    },
     "1k": {
         "BOOT": ( 12, 0, "fabout" ),
         "S0":   ( 13, 1, "fabout" ),
@@ -1712,6 +1804,7 @@ warmbootinfo_db = {
 }
 
 noplls_db = {
+    "ul1k-swg16": [ "ul1k" ],
     "1k-swg16tr": [ "1k" ],
     "1k-cm36": [ "1k" ],
     "1k-cm49": [ "1k" ],
@@ -2265,9 +2358,98 @@ pllinfo_db = {
         "SDI":                  ( 22, 33, "fabout"),
         "SCLK":                 ( 21, 33, "fabout"),
     },
+    # iCE40 UltraLite (the PLL is bonded in CM36A only). The configuration
+    # bits are those of the u4k PLL moved to the bottom IO tiles 4-8
+    # (PLLCONFIG_1-9 in tiles 4-7, 1-7 in tile 8, at the u4k positions). Every
+    # bit and port below is set or routed in iCEcube2 builds of the PLL types
+    # and parameters (dynamic and fixed delays, ICEGATE, TEST_MODE).
+    "ul1k": {
+        "LOC" : (6, 0),
+        "PLLTYPE_0":            ( 6, 0, "PLLCONFIG_5"),
+        "PLLTYPE_1":            ( 8, 0, "PLLCONFIG_1"),
+        "PLLTYPE_2":            ( 8, 0, "PLLCONFIG_3"),
+        "FEEDBACK_PATH_0":      ( 8, 0, "PLLCONFIG_5"),
+        "FEEDBACK_PATH_1":      ( 5, 0, "PLLCONFIG_9"),
+        "FEEDBACK_PATH_2":      ( 6, 0, "PLLCONFIG_1"),
+        "PLLOUT_SELECT_A_0":    ( 6, 0, "PLLCONFIG_6"),
+        "PLLOUT_SELECT_A_1":    ( 6, 0, "PLLCONFIG_7"),
+        "PLLOUT_SELECT_B_0":    ( 6, 0, "PLLCONFIG_2"),
+        "PLLOUT_SELECT_B_1":    ( 6, 0, "PLLCONFIG_3"),
+        "SHIFTREG_DIV_MODE":    ( 6, 0, "PLLCONFIG_4"),
+        "FDA_FEEDBACK_0":       ( 6, 0, "PLLCONFIG_9"),
+        "FDA_FEEDBACK_1":       ( 7, 0, "PLLCONFIG_1"),
+        "FDA_FEEDBACK_2":       ( 7, 0, "PLLCONFIG_2"),
+        "FDA_FEEDBACK_3":       ( 7, 0, "PLLCONFIG_3"),
+        "FDA_RELATIVE_0":       ( 7, 0, "PLLCONFIG_5"),
+        "FDA_RELATIVE_1":       ( 7, 0, "PLLCONFIG_6"),
+        "FDA_RELATIVE_2":       ( 7, 0, "PLLCONFIG_7"),
+        "FDA_RELATIVE_3":       ( 7, 0, "PLLCONFIG_8"),
+        "DIVR_0":               ( 4, 0, "PLLCONFIG_1"),
+        "DIVR_1":               ( 4, 0, "PLLCONFIG_2"),
+        "DIVR_2":               ( 4, 0, "PLLCONFIG_3"),
+        "DIVR_3":               ( 4, 0, "PLLCONFIG_4"),
+        "DIVF_0":               ( 4, 0, "PLLCONFIG_5"),
+        "DIVF_1":               ( 4, 0, "PLLCONFIG_6"),
+        "DIVF_2":               ( 4, 0, "PLLCONFIG_7"),
+        "DIVF_3":               ( 4, 0, "PLLCONFIG_8"),
+        "DIVF_4":               ( 4, 0, "PLLCONFIG_9"),
+        "DIVF_5":               ( 5, 0, "PLLCONFIG_1"),
+        "DIVF_6":               ( 5, 0, "PLLCONFIG_2"),
+        "DIVQ_0":               ( 5, 0, "PLLCONFIG_3"),
+        "DIVQ_1":               ( 5, 0, "PLLCONFIG_4"),
+        "DIVQ_2":               ( 5, 0, "PLLCONFIG_5"),
+        "FILTER_RANGE_0":       ( 5, 0, "PLLCONFIG_6"),
+        "FILTER_RANGE_1":       ( 5, 0, "PLLCONFIG_7"),
+        "FILTER_RANGE_2":       ( 5, 0, "PLLCONFIG_8"),
+        "TEST_MODE":            ( 6, 0, "PLLCONFIG_8"),
+        "DELAY_ADJMODE_FB":     ( 7, 0, "PLLCONFIG_4"),
+        "DELAY_ADJMODE_REL":    ( 7, 0, "PLLCONFIG_9"),
+        "ENABLE_ICEGATE_PORTA": ( 8, 0, "PLLCONFIG_2"),
+        "ENABLE_ICEGATE_PORTB": ( 8, 0, "PLLCONFIG_4"),
+        "PLLOUT_A":             ( 6, 0, 1),
+        "PLLOUT_B":             ( 7, 0, 0),
+        "REFERENCECLK":         ( 1, 0, "fabout"),
+        "EXTFEEDBACK":          ( 2, 0, "fabout"),
+        "DYNAMICDELAY_0":       ( 0, 1, "lutff_2/in_3"),
+        "DYNAMICDELAY_1":       ( 0, 1, "lutff_3/in_3"),
+        "DYNAMICDELAY_2":       ( 0, 1, "lutff_4/in_3"),
+        "DYNAMICDELAY_3":       ( 0, 1, "lutff_5/in_3"),
+        "DYNAMICDELAY_4":       ( 0, 1, "lutff_6/in_3"),
+        "DYNAMICDELAY_5":       ( 0, 1, "lutff_7/in_3"),
+        "DYNAMICDELAY_6":       ( 0, 1, "lutff_0/in_1"),
+        "DYNAMICDELAY_7":       ( 0, 1, "lutff_1/in_1"),
+        # LOCK and SDO: the neighbour wires iCEcube2 routes them on
+        "LOCK":                 ( 1, 1, "neigh_op_bnl_1"),
+        "BYPASS":               ( 9, 0, "fabout"),
+        "RESETB":               ( 8, 0, "fabout"),
+        # the IO latch signal of the bottom IOs (iolatch_db)
+        "LATCHINPUTVALUE":      ( 5, 0, "fabout"),
+        "SDO":                  (12, 1, "neigh_op_bnr_3"),
+        "SDI":                  ( 0, 1, "lutff_1/in_3"),
+        "SCLK":                 ( 0, 1, "lutff_0/in_3"),
+    },
+}
+
+# IO sites whose pads are open drain (the iCE40 UltraLite LED pads RGB0-2,
+# IRLED and BARCODE: they can only pull low, iCEcube2 needs SB_IO_OD there).
+open_drain_db = {
+    "ul1k": [(2, 15, 0), (2, 15, 1), (3, 15, 0), (10, 15, 0), (10, 15, 1)],
 }
 
 padin_pio_db = {
+    # ul1k: 4 and 5 are driven by the oscillators, 0 has no pad in CM36A and
+    # SWG16 (None). The PLL global outputs also drive 3 (PLLOUTGLOBALB) and 6
+    # (PLLOUTGLOBALA).
+    "ul1k": [
+        None,         # glb_netwk_0
+        ( 3,  0, 1),  # glb_netwk_1
+        ( 7, 15, 0),  # glb_netwk_2
+        ( 7,  0, 0),  # glb_netwk_3
+        None,         # glb_netwk_4
+        None,         # glb_netwk_5
+        ( 6,  0, 1),  # glb_netwk_6
+        ( 6, 15, 1),  # glb_netwk_7
+    ],
     "1k": [
         (13,  8, 1),  # glb_netwk_0
         ( 0,  8, 1),  # glb_netwk_1
@@ -2336,6 +2518,59 @@ padin_pio_db = {
 }
 
 ieren_db = {
+    # ul1k: IE/REN bits of each IO in its own tile, with the other index (as
+    # u4k). In iCEcube2 bitstreams an input at z=1 sets B9[3] (IE_0 here,
+    # "IE_1" in iCEcube2 naming), outputs set no IE bit.
+    "ul1k": [
+        ( 1,  0, 0,  1,  0, 1),
+        ( 1,  0, 1,  1,  0, 0),
+        ( 2,  0, 0,  2,  0, 1),
+        ( 2,  0, 1,  2,  0, 0),
+        ( 3,  0, 0,  3,  0, 1),
+        ( 3,  0, 1,  3,  0, 0),
+        ( 4,  0, 0,  4,  0, 1),
+        ( 4,  0, 1,  4,  0, 0),
+        ( 5,  0, 0,  5,  0, 1),
+        ( 5,  0, 1,  5,  0, 0),
+        ( 6,  0, 0,  6,  0, 1),
+        ( 6,  0, 1,  6,  0, 0),
+        ( 7,  0, 0,  7,  0, 1),
+        ( 7,  0, 1,  7,  0, 0),
+        ( 8,  0, 0,  8,  0, 1),
+        ( 8,  0, 1,  8,  0, 0),
+        ( 9,  0, 0,  9,  0, 1),
+        ( 9,  0, 1,  9,  0, 0),
+        (10,  0, 0, 10,  0, 1),
+        (10,  0, 1, 10,  0, 0),
+        (11,  0, 0, 11,  0, 1),
+        (11,  0, 1, 11,  0, 0),
+        (12,  0, 0, 12,  0, 1),
+        (12,  0, 1, 12,  0, 0),
+        ( 1, 15, 0,  1, 15, 1),
+        ( 1, 15, 1,  1, 15, 0),
+        ( 2, 15, 0,  2, 15, 1),
+        ( 2, 15, 1,  2, 15, 0),
+        ( 3, 15, 0,  3, 15, 1),
+        ( 3, 15, 1,  3, 15, 0),
+        ( 4, 15, 0,  4, 15, 1),
+        ( 4, 15, 1,  4, 15, 0),
+        ( 5, 15, 0,  5, 15, 1),
+        ( 5, 15, 1,  5, 15, 0),
+        ( 6, 15, 0,  6, 15, 1),
+        ( 6, 15, 1,  6, 15, 0),
+        ( 7, 15, 0,  7, 15, 1),
+        ( 7, 15, 1,  7, 15, 0),
+        ( 8, 15, 0,  8, 15, 1),
+        ( 8, 15, 1,  8, 15, 0),
+        ( 9, 15, 0,  9, 15, 1),
+        ( 9, 15, 1,  9, 15, 0),
+        (10, 15, 0, 10, 15, 1),
+        (10, 15, 1, 10, 15, 0),
+        (11, 15, 0, 11, 15, 1),
+        (11, 15, 1, 11, 15, 0),
+        (12, 15, 0, 12, 15, 1),
+        (12, 15, 1, 12, 15, 0)
+    ],
     "1k": [
         # IO-block (X, Y, Z) <-> IeRen-block (X, Y, Z)
         ( 0,  2, 0,  0,  2, 1),
@@ -2834,6 +3069,48 @@ ieren_db = {
 # corresponding grid location (x, y, block). This is most easily found through
 # the package view in iCEcube2 by hovering the mouse over each pin.
 pinloc_db = {
+    # iCE40 UltraLite (UL1K, UL640). Sites seen in iCEcube2 placements, except
+    # "pair": the other pad of a verified A/B pair (A = 0, B = 1).
+    "ul1k-cm36a": [
+        ( "A1",  3, 15, 0), # RGB2
+        ( "A2",  2, 15, 0), # RGB0
+        ( "A3",  5, 15, 0), # IOT_25A
+        ( "A4",  9, 15, 0), # IOT_19A
+        ( "A5", 10, 15, 1), # BARCODE
+        ( "A6", 10, 15, 0), # IRLED
+        ( "B1",  2, 15, 1), # RGB1
+        ( "B2",  5, 15, 1), # IOT_24B
+        ( "B5",  9, 15, 1), # IOT_18B
+        ( "B6",  7, 15, 0), # IOT_21A_G1
+        ( "C1",  4,  0, 1), # IOB_5B
+        ( "C2",  4, 15, 0), # IOT_27A
+        ( "C6",  6, 15, 1), # IOT_22B_G0
+        ( "D1",  4,  0, 0), # IOB_4A
+        ( "D2",  7,  0, 0), # IOB_8A_G4
+        ( "D5",  9,  0, 1), # IOB_11B_CDONE  pair
+        ( "D6",  9,  0, 0), # IOB_10A
+        ( "E1",  2,  0, 1), # IOB_1B
+        ( "E2",  6,  0, 0), # IOB_6A
+        ( "E5", 11,  0, 1), # IOB_15B_SI     pair
+        ( "E6", 12,  0, 0), # IOB_16A_SCK
+        ( "F1",  2,  0, 0), # IOB_0A
+        ( "F2",  3,  0, 1), # IOB_3B_G6
+        ( "F3",  6,  0, 1), # IOB_7B_G5
+        ( "F5", 12,  0, 1), # IOB_17B_SS
+        ( "F6", 11,  0, 0), # IOB_14A_SO
+    ],
+    "ul1k-swg16": [
+        ( "A1", 10, 15, 0), # IRLED
+        ( "A2", 10, 15, 1), # BARCODE
+        ( "A4",  2, 15, 1), # RGB1
+        ( "B4",  2, 15, 0), # RGB0
+        ( "C1", 12,  0, 0), # IOB_16A_SCK
+        ( "C2", 11,  0, 0), # IOB_14A_SO
+        ( "C3",  7,  0, 0), # IOB_8A_G4_CDONE
+        ( "C4",  3, 15, 0), # RGB2
+        ( "D1", 12,  0, 1), # IOB_17B_SS
+        ( "D2", 11,  0, 1), # IOB_15B_SI     pair
+    ],
     "1k-swg16tr": [
         ( "A2",  6, 17, 1),
         ( "A4",  2, 17, 0),
@@ -6052,6 +6329,296 @@ extra_cells_db = {
             "RGB1":                         (12, 21, 0),
             "RGB2":                         (8, 21, 0)
         },
+    },
+    # iCE40 UltraLite. Ports from the iCEcube2 routes of hard IP pins, config
+    # bits from iCEcube2 designs with known parameters. Locations as iCEcube2
+    # places the cells, LFOSC (not placed in any known design) at the
+    # opposite corner.
+    "ul1k" : {
+        ("HFOSC", (0, 0, 0)) : {
+            "CLKHFPU":                      (0, 3, "lutff_5/in_1"),
+            "CLKHFEN":                      (0, 3, "lutff_4/in_1"),
+            "CLKHF":                        (0, 3, "glb_netwk_4"),
+            # clock into the fabric in designs with the HFOSC enables driven
+            # and no padin bit set
+            "CLKHF_FABRIC":                 (0, 1, "slf_op_4"),
+            # divider bits (iCEcube2 builds with each CLKHF_DIV value)
+            "CLKHF_DIV_0":                  (0, 13, "CBIT_2"),
+            "CLKHF_DIV_1":                  (0, 13, "CBIT_3"),
+            # VPP_2V5_TO_1P8V="1"/"true" (VPP_2V5 at 1.8 V), as iCEcube2 sets
+            # it for each cell; the LED drivers share one bit
+            "VPP_2V5_TO_1P8V":              (0, 13, "CBIT_4"),
+        },
+        ("LFOSC", (13, 0, 0)) : {
+            "CLKLFEN":                      (13, 3, "lutff_4/in_3"),
+            "CLKLFPU":                      (13, 3, "lutff_3/in_3"),
+            "CLKLF":                        (13, 3, "glb_netwk_5"),
+            "CLKLF_FABRIC":                 (13, 1, "slf_op_4"),
+            "VPP_2V5_TO_1P8V":              (0, 13, "CBIT_1"),
+        },
+        # RGBx_CURRENT is a thermometer code; the designs use bits 0-2 and
+        # all bits; bits 3-5 follow the order of the others.
+        ("RGBA_DRV", (0, 15, 1)) : {
+            "RGBA_DRV_EN":                  (0, 1, "CBIT_0"),
+            "RGB0_CURRENT_0":               (0, 1, "CBIT_1"),
+            "RGB0_CURRENT_1":               (0, 1, "CBIT_2"),
+            "RGB0_CURRENT_2":               (0, 1, "CBIT_3"),
+            "RGB0_CURRENT_3":               (0, 1, "CBIT_4"),
+            "RGB0_CURRENT_4":               (0, 1, "CBIT_5"),
+            "RGB0_CURRENT_5":               (0, 1, "CBIT_6"),
+            "RGB1_CURRENT_0":               (0, 1, "CBIT_7"),
+            "RGB1_CURRENT_1":               (0, 2, "CBIT_0"),
+            "RGB1_CURRENT_2":               (0, 2, "CBIT_1"),
+            "RGB1_CURRENT_3":               (0, 2, "CBIT_2"),
+            "RGB1_CURRENT_4":               (0, 2, "CBIT_3"),
+            "RGB1_CURRENT_5":               (0, 2, "CBIT_4"),
+            "RGB2_CURRENT_0":               (0, 2, "CBIT_5"),
+            "RGB2_CURRENT_1":               (0, 2, "CBIT_6"),
+            "RGB2_CURRENT_2":               (0, 2, "CBIT_7"),
+            "RGB2_CURRENT_3":               (0, 3, "CBIT_0"),
+            "RGB2_CURRENT_4":               (0, 3, "CBIT_1"),
+            "RGB2_CURRENT_5":               (0, 3, "CBIT_2"),
+            "CURRENT_MODE":                 (0, 3, "CBIT_3"),
+            # set whenever the RGB driver is used, as LED_DRV_CUR_EN on the u4k
+            "LED_DRV_CUR_EN":               (13, 1, "CBIT_1"),
+            "VPP_2V5_TO_1P8V":              (0, 13, "CBIT_0"),
+            "CURREN":                       (13, 2, "lutff_0/in_1"),
+            "RGBLEDEN":                     (0, 2, "lutff_1/in_1"),
+            "RGB0PWM":                      (0, 14, "lutff_5/in_0"),
+            "RGB1PWM":                      (0, 14, "lutff_6/in_0"),
+            "RGB2PWM":                      (0, 14, "lutff_7/in_0"),
+            "RGB0":                         (2, 15, 0),
+            "RGB1":                         (2, 15, 1),
+            "RGB2":                         (3, 15, 0)
+        },
+        # The I2C cores (SB_I2C_FIFO). The enable (cbit2usealt) and SDA delay
+        # bits are in the tile of the core's SCL/SDA pads. Every port and bit
+        # is used in iCEcube2 builds of both cores. The slave address is not in
+        # the bitstream (it selects the core: ..01 left, ..10 right).
+        ("I2C_FIFO", (0, 0, 1)) : {
+            "ACKO":                         (0, 3, "slf_op_2"),
+            "ADRI0":                        (0, 2, "lutff_0/in_3"),
+            "ADRI1":                        (0, 2, "lutff_1/in_3"),
+            "ADRI2":                        (0, 2, "lutff_2/in_3"),
+            "ADRI3":                        (0, 2, "lutff_3/in_3"),
+            "CLKI":                         (0, 1, "clk"),
+            "CSI":                          (0, 2, "lutff_4/in_3"),
+            "DATI0":                        (0, 1, "lutff_6/in_1"),
+            "DATI1":                        (0, 1, "lutff_7/in_1"),
+            "DATI2":                        (0, 1, "lutff_0/in_0"),
+            "DATI3":                        (0, 1, "lutff_1/in_0"),
+            "DATI4":                        (0, 1, "lutff_2/in_0"),
+            "DATI5":                        (0, 1, "lutff_3/in_0"),
+            "DATI6":                        (0, 1, "lutff_4/in_0"),
+            "DATI7":                        (0, 1, "lutff_5/in_0"),
+            "DATI8":                        (0, 1, "lutff_6/in_0"),
+            "DATI9":                        (0, 1, "lutff_7/in_0"),
+            "DATO0":                        (0, 2, "slf_op_0"),
+            "DATO1":                        (0, 2, "slf_op_1"),
+            "DATO2":                        (0, 2, "slf_op_2"),
+            "DATO3":                        (0, 2, "slf_op_3"),
+            "DATO4":                        (0, 2, "slf_op_4"),
+            "DATO5":                        (0, 2, "slf_op_5"),
+            "DATO6":                        (0, 2, "slf_op_6"),
+            "DATO7":                        (0, 2, "slf_op_7"),
+            "DATO8":                        (0, 3, "slf_op_0"),
+            "DATO9":                        (0, 3, "slf_op_1"),
+            "FIFORST":                      (0, 2, "lutff_5/in_3"),
+            "I2CIRQ":                       (0, 3, "slf_op_3"),
+            "I2CWKUP":                      (0, 1, "slf_op_6"),
+            "MRDCMPL":                      (0, 1, "slf_op_5"),
+            "RXFIFOAFULL":                  (0, 3, "slf_op_7"),
+            "RXFIFOEMPTY":                  (0, 12, "slf_op_0"),
+            "RXFIFOFULL":                   (0, 12, "slf_op_1"),
+            "SCLI":                         (0, 1, "lutff_3/in_1"),
+            "SCLO":                         (0, 1, "slf_op_2"),
+            "SCLOE":                        (0, 1, "slf_op_3"),
+            "SDAI":                         (0, 1, "lutff_2/in_1"),
+            "SDAO":                         (0, 1, "slf_op_0"),
+            "SDAOE":                        (0, 1, "slf_op_1"),
+            "SRWO":                         (0, 1, "slf_op_7"),
+            "STBI":                         (0, 1, "lutff_4/in_1"),
+            "TXFIFOAEMPTY":                 (0, 3, "slf_op_4"),
+            "TXFIFOEMPTY":                  (0, 3, "slf_op_5"),
+            "TXFIFOFULL":                   (0, 3, "slf_op_6"),
+            "WEI":                          (0, 1, "lutff_5/in_1"),
+            "I2C_ENABLE_0":                 (3, 0, "cbit2usealt_in_0"),
+            "I2C_ENABLE_1":                 (3, 0, "cbit2usealt_in_1"),
+            "SDA_INPUT_DELAYED":            (3, 0, "SDA_input_delay"),
+            "SDA_OUTPUT_DELAYED":           (3, 0, "SDA_output_delay"),
+        },
+        ("I2C_FIFO", (13, 0, 1)) : {
+            "ACKO":                         (13, 3, "slf_op_2"),
+            "ADRI0":                        (13, 2, "lutff_0/in_3"),
+            "ADRI1":                        (13, 2, "lutff_1/in_3"),
+            "ADRI2":                        (13, 2, "lutff_2/in_3"),
+            "ADRI3":                        (13, 2, "lutff_3/in_3"),
+            "CLKI":                         (13, 1, "clk"),
+            "CSI":                          (13, 2, "lutff_4/in_3"),
+            "DATI0":                        (13, 1, "lutff_6/in_1"),
+            "DATI1":                        (13, 1, "lutff_7/in_1"),
+            "DATI2":                        (13, 1, "lutff_0/in_0"),
+            "DATI3":                        (13, 1, "lutff_1/in_0"),
+            "DATI4":                        (13, 1, "lutff_2/in_0"),
+            "DATI5":                        (13, 1, "lutff_3/in_0"),
+            "DATI6":                        (13, 1, "lutff_4/in_0"),
+            "DATI7":                        (13, 1, "lutff_5/in_0"),
+            "DATI8":                        (13, 1, "lutff_6/in_0"),
+            "DATI9":                        (13, 1, "lutff_7/in_0"),
+            "DATO0":                        (13, 2, "slf_op_0"),
+            "DATO1":                        (13, 2, "slf_op_1"),
+            "DATO2":                        (13, 2, "slf_op_2"),
+            "DATO3":                        (13, 2, "slf_op_3"),
+            "DATO4":                        (13, 2, "slf_op_4"),
+            "DATO5":                        (13, 2, "slf_op_5"),
+            "DATO6":                        (13, 2, "slf_op_6"),
+            "DATO7":                        (13, 2, "slf_op_7"),
+            "DATO8":                        (13, 3, "slf_op_0"),
+            "DATO9":                        (13, 3, "slf_op_1"),
+            "FIFORST":                      (13, 2, "lutff_5/in_3"),
+            "I2CIRQ":                       (13, 3, "slf_op_3"),
+            "I2CWKUP":                      (13, 1, "slf_op_6"),
+            "MRDCMPL":                      (13, 1, "slf_op_5"),
+            "RXFIFOAFULL":                  (13, 3, "slf_op_7"),
+            "RXFIFOEMPTY":                  (13, 12, "slf_op_0"),
+            "RXFIFOFULL":                   (13, 12, "slf_op_1"),
+            "SCLI":                         (13, 1, "lutff_3/in_1"),
+            "SCLO":                         (13, 1, "slf_op_2"),
+            "SCLOE":                        (13, 1, "slf_op_3"),
+            "SDAI":                         (13, 1, "lutff_2/in_1"),
+            "SDAO":                         (13, 1, "slf_op_0"),
+            "SDAOE":                        (13, 1, "slf_op_1"),
+            "SRWO":                         (13, 1, "slf_op_7"),
+            "STBI":                         (13, 1, "lutff_4/in_1"),
+            "TXFIFOAEMPTY":                 (13, 3, "slf_op_4"),
+            "TXFIFOEMPTY":                  (13, 3, "slf_op_5"),
+            "TXFIFOFULL":                   (13, 3, "slf_op_6"),
+            "WEI":                          (13, 1, "lutff_5/in_1"),
+            "I2C_ENABLE_0":                 (9, 0, "cbit2usealt_in_0"),
+            "I2C_ENABLE_1":                 (9, 0, "cbit2usealt_in_1"),
+            "SDA_INPUT_DELAYED":            (9, 0, "SDA_input_delay"),
+            "SDA_OUTPUT_DELAYED":           (9, 0, "SDA_output_delay"),
+        },
+        # LED PWM controller, IR and barcode drivers, IR transceiver: every
+        # port and configuration bit is used in iCEcube2 builds
+        # (SB_LEDDA_IP and SB_IR_IP have no configuration bits).
+        # CURREN is shared with SB_RGBA_DRV (icebox_vlog connects it but does
+        # not count it as use), the TRIM0-9 inputs of the LED drivers are left
+        # out. SB_IR500_DRV is the IR and barcode drivers together, with one
+        # 12-bit current (barcode current bits first); icebox_vlog emits it
+        # instead of the two when its enable bit is set.
+        ("LEDDA_IP", (0, 15, 0)) : {
+            "LEDDADDR0":                    (0, 2, "lutff_6/in_0"),
+            "LEDDADDR1":                    (0, 2, "lutff_7/in_0"),
+            "LEDDADDR2":                    (0, 3, "lutff_0/in_3"),
+            "LEDDADDR3":                    (0, 3, "lutff_1/in_3"),
+            "LEDDCLK":                      (0, 14, "clk"),
+            "LEDDCS":                       (0, 2, "lutff_4/in_0"),
+            "LEDDDAT0":                     (0, 2, "lutff_4/in_1"),
+            "LEDDDAT1":                     (0, 2, "lutff_5/in_1"),
+            "LEDDDAT2":                     (0, 2, "lutff_6/in_1"),
+            "LEDDDAT3":                     (0, 2, "lutff_7/in_1"),
+            "LEDDDAT4":                     (0, 2, "lutff_0/in_0"),
+            "LEDDDAT5":                     (0, 2, "lutff_1/in_0"),
+            "LEDDDAT6":                     (0, 2, "lutff_2/in_0"),
+            "LEDDDAT7":                     (0, 2, "lutff_3/in_0"),
+            "LEDDDEN":                      (0, 2, "lutff_3/in_1"),
+            "LEDDEXE":                      (0, 2, "lutff_2/in_1"),
+            "LEDDON":                       (0, 12, "slf_op_2"),
+            "PWMOUT0":                      (0, 12, "slf_op_3"),
+            "PWMOUT1":                      (0, 12, "slf_op_4"),
+            "PWMOUT2":                      (0, 12, "slf_op_5"),
+        },
+        ("BARCODE_DRV", (13, 15, 0)) : {
+            "BARCODE_DRV_EN":               (13, 2, "CBIT_7"),
+            "BARCODE_CURRENT_0":            (13, 1, "CBIT_2"),
+            "BARCODE_CURRENT_1":            (13, 1, "CBIT_3"),
+            "BARCODE_CURRENT_2":            (13, 1, "CBIT_4"),
+            "BARCODE_CURRENT_3":            (13, 1, "CBIT_5"),
+            "CURRENT_MODE":                 (13, 2, "CBIT_6"),
+            "VPP_2V5_TO_1P8V":              (0, 13, "CBIT_0"),
+            "CURREN":                       (13, 2, "lutff_0/in_1"),
+            "BARCODEEN":                    (13, 2, "lutff_3/in_0"),
+            "BARCODEPWM":                   (13, 14, "lutff_6/in_0"),
+            "BARCODE":                      (10, 15, 1),
+        },
+        ("IR400_DRV", (13, 15, 1)) : {
+            "IR400_DRV_EN":                 (13, 1, "CBIT_0"),
+            "IR400_CURRENT_0":              (13, 1, "CBIT_6"),
+            "IR400_CURRENT_1":              (13, 1, "CBIT_7"),
+            "IR400_CURRENT_2":              (13, 2, "CBIT_0"),
+            "IR400_CURRENT_3":              (13, 2, "CBIT_1"),
+            "IR400_CURRENT_4":              (13, 2, "CBIT_2"),
+            "IR400_CURRENT_5":              (13, 2, "CBIT_3"),
+            "IR400_CURRENT_6":              (13, 2, "CBIT_4"),
+            "IR400_CURRENT_7":              (13, 2, "CBIT_5"),
+            "CURRENT_MODE":                 (13, 2, "CBIT_6"),
+            "VPP_2V5_TO_1P8V":              (0, 13, "CBIT_0"),
+            "CURREN":                       (13, 2, "lutff_0/in_1"),
+            "IRLEDEN":                      (13, 2, "lutff_4/in_0"),
+            "IRPWM":                        (13, 14, "lutff_7/in_0"),
+            "IRLED":                        (10, 15, 0),
+        },
+        ("IR500_DRV", (13, 15, 3)) : {
+            "IR500_DRV_EN":                 (13, 3, "CBIT_0"),
+            # iCEcube2 also sets the enables of the two drivers it uses
+            "IR500_IR_EN":                  (13, 1, "CBIT_0"),
+            "IR500_BARCODE_EN":             (13, 2, "CBIT_7"),
+            "IR500_CURRENT_0":              (13, 1, "CBIT_2"),
+            "IR500_CURRENT_1":              (13, 1, "CBIT_3"),
+            "IR500_CURRENT_2":              (13, 1, "CBIT_4"),
+            "IR500_CURRENT_3":              (13, 1, "CBIT_5"),
+            "IR500_CURRENT_4":              (13, 1, "CBIT_6"),
+            "IR500_CURRENT_5":              (13, 1, "CBIT_7"),
+            "IR500_CURRENT_6":              (13, 2, "CBIT_0"),
+            "IR500_CURRENT_7":              (13, 2, "CBIT_1"),
+            "IR500_CURRENT_8":              (13, 2, "CBIT_2"),
+            "IR500_CURRENT_9":              (13, 2, "CBIT_3"),
+            "IR500_CURRENT_10":             (13, 2, "CBIT_4"),
+            "IR500_CURRENT_11":             (13, 2, "CBIT_5"),
+            "CURRENT_MODE":                 (13, 2, "CBIT_6"),
+            "VPP_2V5_TO_1P8V":              (0, 13, "CBIT_0"),
+            "CURREN":                       (13, 2, "lutff_0/in_1"),
+            "IRLEDEN":                      (13, 2, "lutff_4/in_0"),
+            "IRLEDEN2":                     (13, 2, "lutff_3/in_0"),
+            "IRPWM":                        (13, 14, "lutff_7/in_0"),
+            "IRPWM2":                       (13, 14, "lutff_6/in_0"),
+            "IRLED1":                       (10, 15, 0),
+            "IRLED2":                       (10, 15, 1),
+        },
+        ("IR_IP", (13, 15, 2)) : {
+            "ADRI0":                        (13, 12, "lutff_2/in_3"),
+            "ADRI1":                        (13, 12, "lutff_3/in_3"),
+            "ADRI2":                        (13, 12, "lutff_4/in_3"),
+            "ADRI3":                        (13, 12, "lutff_5/in_3"),
+            "CLKI":                         (13, 14, "clk"),
+            "CSI":                          (13, 12, "lutff_0/in_1"),
+            "DENI":                         (13, 12, "lutff_7/in_3"),
+            "EXE":                          (13, 12, "lutff_2/in_1"),
+            "IRIN":                         (13, 3, "lutff_0/in_0"),
+            "LEARN":                        (13, 3, "lutff_1/in_0"),
+            "WDATA0":                       (13, 3, "lutff_2/in_0"),
+            "WDATA1":                       (13, 3, "lutff_3/in_0"),
+            "WDATA2":                       (13, 3, "lutff_4/in_0"),
+            "WDATA3":                       (13, 3, "lutff_5/in_0"),
+            "WDATA4":                       (13, 3, "lutff_6/in_0"),
+            "WDATA5":                       (13, 3, "lutff_7/in_0"),
+            "WDATA6":                       (13, 12, "lutff_0/in_3"),
+            "WDATA7":                       (13, 12, "lutff_1/in_3"),
+            "WEI":                          (13, 12, "lutff_6/in_3"),
+            "BUSY":                         (13, 12, "slf_op_3"),
+            "DRDY":                         (13, 12, "slf_op_4"),
+            "ERR":                          (13, 12, "slf_op_5"),
+            "RDATA0":                       (13, 12, "slf_op_6"),
+            "RDATA1":                       (13, 12, "slf_op_7"),
+            "RDATA2":                       (13, 13, "slf_op_0"),
+            "RDATA3":                       (13, 13, "slf_op_1"),
+            "RDATA4":                       (13, 13, "slf_op_2"),
+            "RDATA5":                       (13, 13, "slf_op_3"),
+            "RDATA6":                       (13, 13, "slf_op_4"),
+            "RDATA7":                       (13, 13, "slf_op_5"),
+            "IROUT":                        (13, 13, "slf_op_6"),
+        },
     }
 }
 
@@ -6182,6 +6749,16 @@ for db in [iotile_l_db, iotile_r_db, iotile_t_db, iotile_b_db, iotile_t_5k_db, i
         unique_entries[key] = entry
     for key in sorted(unique_entries):
         db.append(unique_entries[key])
+
+# ul1k: hard IP inputs reach the IPConnect tiles of the side columns also over
+# the diagonal neighbour wires, with the logic tile encoding (iCEcube2 routes
+# I2C and IR transceiver ports this way). Only these switches are added; the
+# other logic tile inputs of the muxes are not seen in any iCEcube2 bitstream.
+ipcon_ul1k_db = list(ipcon_5k_db)
+for entry in logictile_5k_db:
+    if entry[1] == "buffer" and (entry[2], entry[3]) in (("neigh_op_tnl_1", "local_g3_1"), ("neigh_op_tnl_4", "local_g3_4"),
+            ("neigh_op_tnl_7", "local_g2_7"), ("neigh_op_tnr_1", "local_g3_1"), ("neigh_op_tnr_4", "local_g3_4")):
+        ipcon_ul1k_db.append(entry)
 
 if __name__ == "__main__":
     run_checks()

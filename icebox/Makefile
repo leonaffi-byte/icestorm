@@ -6,7 +6,7 @@ else
   SED_I = sed -i ''
 endif
 
-all: chipdb-384.txt chipdb-1k.txt chipdb-8k.txt chipdb-5k.txt chipdb-lm4k.txt chipdb-u4k.txt
+all: chipdb-384.txt chipdb-1k.txt chipdb-8k.txt chipdb-5k.txt chipdb-lm4k.txt chipdb-u4k.txt chipdb-ul1k.txt
 
 chipdb-384.txt: icebox.py iceboxdb.py icebox_chipdb.py
 	$(PYTHON3) icebox_chipdb.py -3 > chipdb-384.new
@@ -24,6 +24,10 @@ chipdb-u4k.txt: icebox.py iceboxdb.py icebox_chipdb.py
 	$(PYTHON3) icebox_chipdb.py -u > chipdb-u4k.new
 	mv chipdb-u4k.new chipdb-u4k.txt
 
+chipdb-ul1k.txt: icebox.py iceboxdb.py icebox_chipdb.py
+	$(PYTHON3) icebox_chipdb.py -U > chipdb-ul1k.new
+	mv chipdb-ul1k.new chipdb-ul1k.txt
+
 chipdb-lm4k.txt: icebox.py iceboxdb.py icebox_chipdb.py
 	$(PYTHON3) icebox_chipdb.py -4 > chipdb-lm4k.new
 	mv chipdb-lm4k.new chipdb-lm4k.txt
@@ -38,7 +42,7 @@ check: all
 	$(PYTHON3) tc_logic_xpr.py
 
 clean:
-	rm -f chipdb-1k.txt chipdb-8k.txt chipdb-384.txt chipdb-5k.txt chipdb-lm4k.txt chipdb-u4k.txt
+	rm -f chipdb-1k.txt chipdb-8k.txt chipdb-384.txt chipdb-5k.txt chipdb-lm4k.txt chipdb-u4k.txt chipdb-ul1k.txt
 	rm -f icebox.pyc iceboxdb.pyc
 
 install: all
@@ -50,6 +54,7 @@ install: all
 	cp chipdb-5k.txt     $(DESTDIR)$(PREFIX)/share/$(PROGRAM_PREFIX)icebox/
 	cp chipdb-u4k.txt    $(DESTDIR)$(PREFIX)/share/$(PROGRAM_PREFIX)icebox/
 	cp chipdb-lm4k.txt   $(DESTDIR)$(PREFIX)/share/$(PROGRAM_PREFIX)icebox/
+	cp chipdb-ul1k.txt   $(DESTDIR)$(PREFIX)/share/$(PROGRAM_PREFIX)icebox/
 	cp icebox.py         $(DESTDIR)$(PREFIX)/bin/$(subst -,_,$(PROGRAM_PREFIX))icebox.py
 	cp iceboxdb.py       $(DESTDIR)$(PREFIX)/bin/$(subst -,_,$(PROGRAM_PREFIX))iceboxdb.py
 	cp icebox_chipdb.py  $(DESTDIR)$(PREFIX)/bin/$(PROGRAM_PREFIX)icebox_chipdb$(PY_EXE)
@@ -101,6 +106,7 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/share/$(PROGRAM_PREFIX)icebox/chipdb-1k.txt
 	rm -f $(DESTDIR)$(PREFIX)/share/$(PROGRAM_PREFIX)icebox/chipdb-8k.txt
 	rm -f $(DESTDIR)$(PREFIX)/share/$(PROGRAM_PREFIX)icebox/chipdb-lm4k.txt
+	rm -f $(DESTDIR)$(PREFIX)/share/$(PROGRAM_PREFIX)icebox/chipdb-ul1k.txt
 	rm -f $(DESTDIR)$(PREFIX)/share/$(PROGRAM_PREFIX)icebox/chipdb-u4k.txt
 	-rmdir $(DESTDIR)$(PREFIX)/share/$(PROGRAM_PREFIX)icebox
 

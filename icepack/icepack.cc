@@ -133,6 +133,9 @@ struct FpgaConfig
 	int chip_width() const;
 	int chip_height() const;
 	vector<int> chip_cols() const;
+	int cram_bank_height(int bank) const;
+	int bram_bank_width(int bank) const;
+	int top_half_y() const;
 
 	// query tile metadata
 	string tile_type(int x, int y) const;
@@ -423,10 +426,19 @@ void FpgaConfig::read_bits(std::istream &ifs)
 		this->device = "u4k";
 	else if (this->cram_width == 656 && this->cram_height == 176)
 		this->device = "lm4k";
+	else if (this->cram_width == 368 && this->cram_height == 144)
+		this->device = "ul1k";
 	else
 		error("Failed to detect chip type.\n");
 
 	info("Chip type is '%s'.\n", this->device.c_str());
+
+	// Banks with different heights (ul1k: bottom banks are shorter than the
+	// top banks, read last) are padded to the full height, so that all banks
+	// can be indexed with the same range.
+	for (auto &bank : this->cram)
+		for (auto &col : bank)
+			col.resize(this->cram_height);
 }
 
 void FpgaConfig::write_bits(std::ostream &ofs) const
@@ -487,7 +499,7 @@ void FpgaConfig::write_bits(std::ostream &ofs) const
 	write_byte(ofs, crc_value, file_offset, 0x62);
 	write_byte(ofs, crc_value, file_offset, (this->cram_width-1) >> 8);
 	write_byte(ofs, crc_value, file_offset, (this->cram_width-1));
-	if(this->device != "5k") {
+	if(this->device != "5k" && this->device != "ul1k") {
 		debug("CRAM: Setting bank height to %d.\n", this->cram_height);
 		write_byte(ofs, crc_value, file_offset, 0x72);
 		write_byte(ofs, crc_value, file_offset, this->cram_height >> 8);
@@ -502,14 +514,12 @@ void FpgaConfig::write_bits(std::ostream &ofs) const
 	for (int cram_bank = 0; cram_bank < 4; cram_bank++)
 	{
 		vector<bool> cram_bits;
-		int height = this->cram_height;
-		if(this->device == "5k" && ((cram_bank % 2) == 1))
-			height = height / 2 + 8;
+		int height = this->cram_bank_height(cram_bank);
 		for (int cram_y = 0; cram_y < height; cram_y++)
 		for (int cram_x = 0; cram_x < this->cram_width; cram_x++)
 			cram_bits.push_back(this->cram[cram_bank][cram_x][cram_y]);
 
-		if(this->device == "5k") {
+		if(this->device == "5k" || this->device == "ul1k") {
 			debug("CRAM: Setting bank height to %d.\n", height);
 			write_byte(ofs, crc_value, file_offset, 0x72);
 			write_byte(ofs, crc_value, file_offset, height >> 8);
@@ -538,7 +548,7 @@ void FpgaConfig::write_bits(std::ostream &ofs) const
 
 	if (this->bram_width && this->bram_height)
 	{
-		if(this->device != "5k") {
+		if(this->device != "5k" && this->device != "ul1k") {
 			debug("BRAM: Setting bank width to %d.\n", this->bram_width);
 			write_byte(ofs, crc_value, file_offset, 0x62);
 			write_byte(ofs, crc_value, file_offset, (this->bram_width-1) >> 8);
@@ -557,12 +567,19 @@ void FpgaConfig::write_bits(std::ostream &ofs) const
 			write_byte(ofs, crc_value, file_offset, 0x11);
 			write_byte(ofs, crc_value, file_offset, bram_bank);
 
+			// ul1k: the banks have different widths, set once per bank
+			if(this->device == "ul1k") {
+				int width = this->bram_bank_width(bram_bank);
+				debug("BRAM: Setting bank width to %d.\n", width);
+				write_byte(ofs, crc_value, file_offset, 0x62);
+				write_byte(ofs, crc_value, file_offset, (width-1) >> 8);
+				write_byte(ofs, crc_value, file_offset, (width-1));
+			}
+
 			for (int offset = 0; offset < this->bram_height; offset += bram_chunk_size)
 			{
 				vector<bool> bram_bits;
-				int width = this->bram_width;
-				if(this->device == "5k" && ((bram_bank % 2) == 1))
-					width = width / 2;
+				int width = this->bram_bank_width(bram_bank);
 				for (int bram_y = 0; bram_y < bram_chunk_size; bram_y++)
 				for (int bram_x = 0; bram_x < width; bram_x++)
 					bram_bits.push_back(this->bram[bram_bank][bram_x][bram_y+offset]);
@@ -704,9 +721,31 @@ void FpgaConfig::read_ascii(std::istream &ifs, bool nosleep)
 				this->bram_width = 80;
 				this->bram_height = 2 * 128;
 			} else
+			if (this->device == "ul1k") {
+				this->cram_width = 368;
+				this->cram_height = 144;
+				this->bram_width = 64;
+				this->bram_height = 2 * 128;
+			} else
 				error("Unsupported chip type '%s'.\n", this->device.c_str());
 
 			this->cram.resize(4);
+			if(this->device == "ul1k") {
+				// all banks full height (see read_bits), BRAM banks of their own width
+				for (int i = 0; i < 4; i++) {
+					this->cram[i].resize(this->cram_width);
+					for (int x = 0; x < this->cram_width; x++)
+						this->cram[i][x].resize(this->cram_height);
+				}
+
+				this->bram.resize(4);
+				for (int i = 0; i < 4; i++) {
+					int width = this->bram_bank_width(i);
+					this->bram[i].resize(width);
+					for (int x = 0; x < width; x++)
+						this->bram[i][x].resize(this->bram_height);
+				}
+			} else
 			if(this->device == "5k") {
 				for (int i = 0; i < 4; i++) {
 					this->cram[i].resize(this->cram_width);
@@ -1071,6 +1110,7 @@ int FpgaConfig::chip_width() const
 	if (this->device == "u4k") return 24;
 	if (this->device == "lm4k") return 24;
 	if (this->device == "8k") return 32;
+	if (this->device == "ul1k") return 12;
 	panic("Unknown chip type '%s'.\n", this->device.c_str());
 }
 
@@ -1082,7 +1122,33 @@ int FpgaConfig::chip_height() const
 	if (this->device == "u4k") return 20;
 	if (this->device == "lm4k") return 20;
 	if (this->device == "8k") return 32;
+	if (this->device == "ul1k") return 14;
 	panic("Unknown chip type '%s'.\n", this->device.c_str());
+}
+
+// Height of one CRAM bank. The 5k top banks are shorter, the ul1k (iCE40
+// UltraLite, die T01) has 7 tile rows in the bottom banks and 9 in the top.
+int FpgaConfig::cram_bank_height(int bank) const
+{
+	if (this->device == "5k" && (bank % 2) == 1) return this->cram_height / 2 + 8;
+	if (this->device == "ul1k" && (bank % 2) == 0) return 7 * 16;
+	return this->cram_height;
+}
+
+// Width of one BRAM bank. ul1k: 3 RAM blocks per bottom bank, 4 per top bank.
+int FpgaConfig::bram_bank_width(int bank) const
+{
+	if (this->device == "5k" && (bank % 2) == 1) return this->bram_width / 2;
+	if (this->device == "ul1k" && (bank % 2) == 0) return 48;
+	return this->bram_width;
+}
+
+// Lowest tile row that is in the top banks.
+int FpgaConfig::top_half_y() const
+{
+	if (this->device == "5k") return chip_height() * 2 / 3 + 1;
+	if (this->device == "ul1k") return 7;
+	return chip_height() / 2 + 1;
 }
 
 vector<int> FpgaConfig::chip_cols() const
@@ -1094,6 +1160,8 @@ vector<int> FpgaConfig::chip_cols() const
 	// Its IPConnect or Mutiplier block, five logic, ram, six logic.
 	if (this->device == "5k") return vector<int>({54, 54, 54, 54, 54, 54, 42, 54, 54, 54, 54, 54, 54});
 	if (this->device == "8k") return vector<int>({18, 54, 54, 54, 54, 54, 54, 54, 42, 54, 54, 54, 54, 54, 54, 54, 54});
+	// IPConnect/logic column, two logic, ram, three logic
+	if (this->device == "ul1k") return vector<int>({54, 54, 54, 42, 54, 54, 54});
 	panic("Unknown chip type '%s'.\n", this->device.c_str());
 }
 
@@ -1124,12 +1192,20 @@ string FpgaConfig::tile_type(int x, int y) const
 			return "dsp3";
 		return "ipcon";
 	}
-	
+
+	// ul1k: no left/right IO. The side columns hold IPConnect tiles in rows
+	// 1-3 and 12-14 and logic tiles in between.
+	if (this->device == "ul1k" && (x == 0 || x == this->chip_width()+1)) {
+		if ((1 <= y && y <= 3) || (12 <= y && y <= 14))
+			return "ipcon";
+		return "logic";
+	}
+
 	if ((x == 0 || x == this->chip_width()+1) || (y == 0 || y == this->chip_height()+1)) return "io";
 
 	if (this->device == "384") return "logic";
 
-	if (this->device == "1k") {
+	if (this->device == "1k" || this->device == "ul1k") {
 		if (x == 3 || x == 10) return y % 2 == 1 ? "ramb" : "ramt";
 		return "logic";
 	}
@@ -1219,11 +1295,7 @@ CramIndexConverter::CramIndexConverter(const FpgaConfig *fpga, int tile_x, int t
 
 	this->left_right_io = this->tile_x == 0 || this->tile_x == chip_width+1;
 	this->right_half = this->tile_x > chip_width / 2;
-	if (this->fpga->device == "5k") {
-		this->top_half = this->tile_y > (chip_height * 2 / 3);
-	} else {
-		this->top_half = this->tile_y > chip_height / 2;
-	}
+	this->top_half = this->tile_y >= fpga->top_half_y();
 
 	this->bank_num = 0;
 	if (this->top_half) this->bank_num |= 1;
@@ -1309,6 +1381,12 @@ BramIndexConverter::BramIndexConverter(const FpgaConfig *fpga, int tile_x, int t
 			y_offset = this->tile_y - (2 * chip_height / 3);
 		} else {
 			//y_offset = this->tile_y - (2 * chip_height / 3);
+		}
+	} else if (this->fpga->device == "ul1k") {
+		// RAM blocks start at y=1 (bottom banks) and y=7 (top banks)
+		if (this->tile_y >= fpga->top_half_y()) {
+			this->bank_num |= 1;
+			y_offset = this->tile_y - fpga->top_half_y();
 		}
 	} else if (top_half) {
 		this->bank_num |= 1;

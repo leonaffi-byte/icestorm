@@ -765,6 +765,7 @@ double get_delay_hx1k(std::string cell_type, std::string in_port, std::string ou
 double get_delay_hx8k(std::string cell_type, std::string in_port, std::string out_port);
 double get_delay_up5k(std::string cell_type, std::string in_port, std::string out_port);
 double get_delay_u4k(std::string cell_type, std::string in_port, std::string out_port);
+double get_delay_ul1k(std::string cell_type, std::string in_port, std::string out_port);
 
 double get_delay(std::string cell_type, std::string in_port, std::string out_port)
 {
@@ -791,6 +792,9 @@ double get_delay(std::string cell_type, std::string in_port, std::string out_por
 
 	if (device_type == "u4k" || device_type == "u1k" || device_type == "u2k")
 		return get_delay_u4k(cell_type, in_port, out_port);
+
+	if (device_type == "ul1k" || device_type == "ul640")
+		return get_delay_ul1k(cell_type, in_port, out_port);
 	fprintf(stderr, "No built-in timing database for '%s' devices!\n", device_type.c_str());
 	exit(1);
 }
@@ -1640,6 +1644,10 @@ void make_seg_cell(int net, const net_segment_t &seg)
 	}
 
 	if (sscanf(seg.name.c_str(), "lutff_%d/in_%d", &a, &b) == 2) {
+		// ul1k: the side columns hold logic and IPConnect tiles; the inputs
+		// of the IPConnect tiles (hard IP) end timing paths
+		if (config_device == "ul1k" && config_tile_type[seg.x][seg.y] == "ipcon")
+			return;
 		//"logic" wires at the side of the device are actually IP or DSP
 		if((device_type == "up5k" || device_type == "up3k") && ((seg.x == 0) || (seg.x == int(config_tile_type.size()) - 1))) {
 			std::string primnet;
@@ -1683,6 +1691,9 @@ void make_seg_cell(int net, const net_segment_t &seg)
 
 	if (sscanf(seg.name.c_str(), "slf_op_%d", &a) == 1)
 	{
+		// ul1k: hard IP outputs start timing paths (no IP timing model)
+		if (config_device == "ul1k")
+			return;
 		std::string primnet;
 		auto cell = make_dsp_ip(seg.x, seg.y, seg.name, primnet);
 		if(cell != "") {
@@ -2399,6 +2410,8 @@ int main(int argc, char **argv)
 	if (device_type.empty()) {
 		if(config_device == "5k")
 			device_type = "up" + config_device;
+		else if(config_device == "ul1k")
+			device_type = config_device;
 		else
 			device_type = "lp" + config_device;
 		printf("// Warning: Missing -d parameter. Assuming '%s' device.\n", device_type.c_str());
@@ -2424,6 +2437,10 @@ int main(int argc, char **argv)
 	} else
 	if (device_type == "u4k" || device_type == "u1k" || device_type == "u2k") {
 		if (config_device != "u4k")
+			goto device_chip_mismatch;
+	} else
+	if (device_type == "ul1k" || device_type == "ul640") {
+		if (config_device != "ul1k")
 			goto device_chip_mismatch;
 	} else {
 		fprintf(stderr, "Error: Invalid device type '%s'.\n", device_type.c_str());
